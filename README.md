@@ -22,19 +22,13 @@ Evane takes no credit for the work behind PostgreSQL, pgvector, pgvectorscale, o
 
 This repository is merely a convenience bundle of useful extensions for the purposes of Evane.
 
-## Build
-
-```sh
-docker build -t evane/postgres-age-vectorscale .
-```
-
 ## Run
 
 ```sh
-docker run --name evane-postgres \
+docker run --name postgres-age-vectorscale \
   -e POSTGRES_PASSWORD=postgres \
   -p 5432:5432 \
-  evane/postgres-age-vectorscale
+  quay.io/evanedev/postgres-age-vectorscale
 ```
 
 ## Enable extensions

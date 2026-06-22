@@ -1,0 +1,144 @@
+name: Publish Docker image
+
+on:
+  push:
+    tags:
+      - "*"
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    if: forgejo.ref_type == 'tag'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 480
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            artifact: linux-amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64/v8
+            artifact: linux-arm64-v8
+            runner: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: https://data.forgejo.org/actions/checkout@v4
+
+      - name: Prepare image name
+        id: image
+        shell: bash
+        run: |
+          image="quay.io/${FORGEJO_REPOSITORY}"
+          echo "registry=quay.io" >> "$FORGEJO_OUTPUT"
+          echo "name=${image,,}" >> "$FORGEJO_OUTPUT"
+
+      - name: Log in to Quay.io
+        uses: https://data.forgejo.org/docker/login-action@v4
+        with:
+          registry: ${{ steps.image.outputs.registry }}
+          username: ${{ secrets.QUAY_ROBOT_USERNAME }}
+          password: ${{ secrets.QUAY_ROBOT_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: https://data.forgejo.org/docker/setup-buildx-action@v4
+        with:
+          driver: docker-container
+          driver-opts: |
+            network=host
+
+      - name: Build and push platform image
+        uses: https://data.forgejo.org/docker/build-push-action@v7
+        env:
+          DOCKER_BUILD_RECORD_UPLOAD: "false"
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ matrix.platform }}
+          push: true
+          tags: ${{ steps.image.outputs.name }}:${{ forgejo.ref_name }}-${{ matrix.artifact }}
+          labels: |
+            org.opencontainers.image.source=${{ forgejo.server_url }}/${{ forgejo.repository }}
+            org.opencontainers.image.revision=${{ forgejo.sha }}
+            org.opencontainers.image.version=${{ forgejo.ref_name }}
+
+      - name: Export image reference
+        shell: bash
+        env:
+          REFS_DIR: ${{ runner.temp }}/image-refs
+          IMAGE: ${{ steps.image.outputs.name }}
+          REF_NAME: ${{ forgejo.ref_name }}
+          ARTIFACT: ${{ matrix.artifact }}
+        run: |
+          mkdir -p "$REFS_DIR"
+          printf '%s\n' "${IMAGE}:${REF_NAME}-${ARTIFACT}" > "${REFS_DIR}/${ARTIFACT}"
+
+      - name: Upload image reference
+        uses: https://data.forgejo.org/actions/upload-artifact@v3
+        with:
+          name: image-refs-${{ matrix.artifact }}
+          path: ${{ runner.temp }}/image-refs/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    name: Merge and push image
+    if: forgejo.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Prepare image name
+        id: image
+        shell: bash
+        run: |
+          image="quay.io/${FORGEJO_REPOSITORY}"
+          echo "registry=quay.io" >> "$FORGEJO_OUTPUT"
+          echo "name=${image,,}" >> "$FORGEJO_OUTPUT"
+
+      - name: Log in to Quay.io
+        uses: https://data.forgejo.org/docker/login-action@v4
+        with:
+          registry: ${{ steps.image.outputs.registry }}
+          username: ${{ secrets.QUAY_ROBOT_USERNAME }}
+          password: ${{ secrets.QUAY_ROBOT_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: https://data.forgejo.org/docker/setup-buildx-action@v4
+
+      - name: Download image references
+        uses: https://data.forgejo.org/actions/download-artifact@v3
+        with:
+          path: ${{ runner.temp }}/image-refs
+
+      - name: Create and push manifest
+        shell: bash
+        working-directory: ${{ runner.temp }}/image-refs
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+        run: |
+          set -euo pipefail
+          refs=()
+          while IFS= read -r -d '' ref_path; do
+            while IFS= read -r ref || [ -n "$ref" ]; do
+              if [ -n "$ref" ]; then
+                refs+=("$ref")
+              fi
+            done < "$ref_path"
+          done < <(find . -type f -print0)
+          if [ "${#refs[@]}" -eq 0 ]; then
+            echo "No image references found"
+            exit 1
+          fi
+          for ref in "${refs[@]}"; do
+            docker buildx imagetools inspect "$ref" >/dev/null
+          done
+          docker buildx imagetools create \
+            --tag "${IMAGE}:${FORGEJO_REF_NAME}" \
+            "${refs[@]}"
+
+      - name: Inspect image
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+        run: docker buildx imagetools inspect "${IMAGE}:${FORGEJO_REF_NAME}"

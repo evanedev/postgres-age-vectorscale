@@ -12,7 +12,7 @@ RUN apk add --no-cache --virtual .extension-build-deps \
     build-base \
     ca-certificates \
     cargo \
-    clang19-libclang \
+    clang21-libclang \
     flex \
     git \
     jq \
